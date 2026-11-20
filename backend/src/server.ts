@@ -27,8 +27,8 @@ type AuthRequest = Request & { auth?: { userId: string; role: Role } };
 app.use(helmet()); app.use(cors({ origin: process.env.FRONTEND_URL || "http://localhost:3000", credentials: true })); app.use(express.json({ limit: "16kb" })); app.use(cookieParser());
 const cookieOptions = (persistent: boolean) => ({ httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" as const, path: "/", ...(persistent ? { maxAge: refreshDays * 86400000 } : {}) });
 const challengeOptions = { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax" as const, path: "/api/auth/2fa", maxAge: challengeMinutes * 60000 };
-const accessToken = (user: { id: string; role: Role }) => jwt.sign({ sub: user.id, role: user.role }, signingSecret, { expiresIn: "15m" });
-const refreshToken = (id: string) => jwt.sign({ sid: id }, signingSecret, { expiresIn: `${refreshDays}d` });
+const accessToken = (user: { id: string; role: Role }) => jwt.sign({ sub: user.id, role: user.role }, signingSecret, { expiresIn: "1h" });
+const refreshToken = (id: string, rememberMe: boolean) => jwt.sign({ sid: id, rememberMe }, signingSecret, { expiresIn: `${refreshDays}d` });
 const opaque = () => crypto.randomBytes(32).toString("base64url");
 const tokenHash = (value: string) => crypto.createHash("sha256").update(value).digest("hex");
 const enrollmentFingerprint = (challengeId: string, encryptedSecret: string) => crypto.createHmac("sha256", signingSecret).update(JSON.stringify(["enrollment", challengeId, encryptedSecret])).digest("hex");
@@ -37,14 +37,14 @@ const recoveryCodes = () => Array.from({ length: 10 }, () => `${crypto.randomByt
 const attempts = new Map<string, { count: number; resetAt: number }>();
 function rateLimit(name: string, limit: number, window: number) { return (req: Request, res: Response, next: NextFunction) => { const key = `${name}:${req.ip}`, now = Date.now(), previous = attempts.get(key); if (!previous || previous.resetAt <= now) { attempts.set(key, { count: 1, resetAt: now + window }); return next(); } if (previous.count >= limit) return res.status(429).json({ success: false, message: "Too many attempts. Please try again later." }); previous.count++; return next(); }; }
 function passwordResetEmailRateLimit(req: Request, res: Response, next: NextFunction) { const suppliedEmail = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "invalid"; const key = `password-reset-email:${tokenHash(suppliedEmail)}`, now = Date.now(), previous = attempts.get(key); if (!previous || previous.resetAt <= now) { attempts.set(key, { count: 1, resetAt: now + 900000 }); return next(); } if (previous.count >= 3) return res.status(429).json({ success: false, message: "Too many attempts. Please try again later." }); previous.count++; return next(); }
-async function makeSession(userId: string, userAgent?: string) { const session = await prisma.session.create({ data: { userId, expiresAt: new Date(Date.now() + refreshDays * 86400000), refreshTokenHash: "pending", userAgent: userAgent?.slice(0, 500) } }); const token = refreshToken(session.id); await prisma.session.update({ where: { id: session.id }, data: { refreshTokenHash: await bcrypt.hash(token, 12) } }); return token; }
+async function makeSession(userId: string, rememberMe: boolean, userAgent?: string, db: Pick<PrismaClient, "session"> = prisma) { const session = await db.session.create({ data: { userId, expiresAt: new Date(Date.now() + refreshDays * 86400000), refreshTokenHash: "pending", userAgent: userAgent?.slice(0, 500) } }); const token = refreshToken(session.id, rememberMe); await db.session.update({ where: { id: session.id }, data: { refreshTokenHash: await bcrypt.hash(token, 12) } }); return token; }
 function deny(res: Response) { return res.status(401).json({ success: false, message: "Authentication is required." }); }
 async function authenticate(req: AuthRequest, res: Response, next: NextFunction) { const token = req.header("authorization")?.replace(/^Bearer\s+/i, ""); if (!token) return deny(res); try { const payload = jwt.verify(token, signingSecret) as JwtPayload; if (typeof payload.sub !== "string" || (payload.role !== Role.OWNER && payload.role !== Role.ADMIN)) return deny(res); const user = await prisma.user.findUnique({ where: { id: payload.sub }, select: { isActive: true, twoFactorEnabled: true } }); if (!user?.isActive || !user.twoFactorEnabled) return deny(res); req.auth = { userId: payload.sub, role: payload.role }; return next(); } catch { return deny(res); } }
 const authorize = (...roles: Role[]) => (req: AuthRequest, res: Response, next: NextFunction) => !req.auth || !roles.includes(req.auth.role) ? res.status(403).json({ success: false, message: "You do not have permission to access this resource." }) : next();
 async function createChallenge(userId: string, type: TwoFactorChallengeType, rememberMe: boolean, res: Response) { const token = opaque(); await prisma.twoFactorChallenge.create({ data: { userId, type, rememberMe, tokenHash: tokenHash(token), expiresAt: new Date(Date.now() + challengeMinutes * 60000) } }); res.cookie(challengeCookie, token, challengeOptions); }
 function getChallenge(req: Request, type: TwoFactorChallengeType) { const token = req.cookies[challengeCookie] as string | undefined; return token ? prisma.twoFactorChallenge.findFirst({ where: { tokenHash: tokenHash(token), type, consumedAt: null, expiresAt: { gt: new Date() } }, include: { user: true } }) : Promise.resolve(null); }
 async function consumeChallenge(id: string) { return (await prisma.twoFactorChallenge.updateMany({ where: { id, consumedAt: null, expiresAt: { gt: new Date() } }, data: { consumedAt: new Date() } })).count === 1; }
-async function completeLogin(user: { id: string; email: string; role: Role }, rememberMe: boolean, req: Request, res: Response) { const refresh = await makeSession(user.id, req.get("user-agent")); res.clearCookie(challengeCookie, challengeOptions); res.cookie("hrms_refresh_token", refresh, cookieOptions(rememberMe)); return res.json({ success: true, accessToken: accessToken(user), user }); }
+async function completeLogin(user: { id: string; email: string; role: Role }, rememberMe: boolean, req: Request, res: Response) { const refresh = await makeSession(user.id, rememberMe, req.get("user-agent")); res.clearCookie(challengeCookie, challengeOptions); res.cookie("hrms_refresh_token", refresh, cookieOptions(rememberMe)); return res.json({ success: true, accessToken: accessToken(user), user }); }
 async function useRecoveryCode(userId: string, code: string) { for (const candidate of await prisma.twoFactorRecoveryCode.findMany({ where: { userId, consumedAt: null } })) if (await bcrypt.compare(normalizeCode(code), candidate.codeHash)) return (await prisma.twoFactorRecoveryCode.updateMany({ where: { id: candidate.id, consumedAt: null }, data: { consumedAt: new Date() } })).count === 1; return false; }
 async function secondFactor(user: { id: string; email: string; twoFactorSecretEncrypted: string | null }, code?: string, recoveryCode?: string) { if (code && user.twoFactorSecretEncrypted) return verifyTotp(decryptTotpSecret(user.twoFactorSecretEncrypted, encryptionKey), user.email, code); return recoveryCode ? useRecoveryCode(user.id, recoveryCode) : false; }
 function passwordResetUrl(token: string) { const frontendUrl = process.env.FRONTEND_URL; if (!frontendUrl) throw new Error("FRONTEND_URL must be configured for password reset."); const url = new URL("/reset-password", frontendUrl); url.searchParams.set("token", token); return url.toString(); }
@@ -116,7 +116,7 @@ app.post("/api/auth/2fa/verify-setup", rateLimit("setup-verify", 10, 300000), as
     }
 
     const user = { id: challenge.user.id, email: challenge.user.email, role: challenge.user.role };
-    const refresh = await makeSession(user.id, req.get("user-agent"));
+    const refresh = await makeSession(user.id, challenge.rememberMe, req.get("user-agent"));
     res.clearCookie(challengeCookie, challengeOptions);
     res.cookie("hrms_refresh_token", refresh, cookieOptions(challenge.rememberMe));
     return res.json({ success: true, accessToken: accessToken(user), user, recoveryCodes: codes });
@@ -125,7 +125,42 @@ app.post("/api/auth/2fa/verify-setup", rateLimit("setup-verify", 10, 300000), as
   }
 });
 app.post("/api/auth/2fa/verify-login", rateLimit("login-verify", 10, 300000), async (req, res, next) => { try { const input = verificationSchema.parse(req.body), challenge = await getChallenge(req, TwoFactorChallengeType.LOGIN); if (!challenge || !challenge.user.isActive || !challenge.user.twoFactorEnabled) return res.status(401).json({ success: false, message: "Your verification session has expired. Sign in again." }); if (!(await secondFactor(challenge.user, input.code, input.recoveryCode))) return res.status(401).json({ success: false, message: "Invalid verification code." }); if (!(await consumeChallenge(challenge.id))) return res.status(401).json({ success: false, message: "Your verification session has expired. Sign in again." }); return completeLogin(challenge.user, challenge.rememberMe, req, res).then(() => undefined); } catch (error) { next(error); } });
-app.post("/api/auth/refresh", async (req, res, next) => { try { const token = req.cookies.hrms_refresh_token as string | undefined; if (!token) return deny(res); const payload = jwt.verify(token, signingSecret) as JwtPayload; if (typeof payload.sid !== "string") return deny(res); const session = await prisma.session.findUnique({ where: { id: payload.sid }, include: { user: true } }); if (!session || session.revokedAt || session.expiresAt < new Date() || !session.user.isActive || !session.user.twoFactorEnabled || !(await bcrypt.compare(token, session.refreshTokenHash))) return deny(res); await prisma.session.update({ where: { id: session.id }, data: { revokedAt: new Date() } }); const fresh = await makeSession(session.userId, req.get("user-agent")); res.cookie("hrms_refresh_token", fresh, cookieOptions(true)); return res.json({ success: true, accessToken: accessToken(session.user) }); } catch (error) { next(error); } });
+app.post("/api/auth/refresh", async (req, res, next) => {
+  try {
+    const token = req.cookies.hrms_refresh_token as string | undefined;
+    if (!token) return deny(res);
+
+    let payload: string | JwtPayload;
+    try {
+      payload = jwt.verify(token, signingSecret);
+    } catch (error) {
+      if (error instanceof jwt.JsonWebTokenError) return deny(res);
+      throw error;
+    }
+    if (typeof payload === "string" || typeof payload.sid !== "string") return deny(res);
+
+    const session = await prisma.session.findUnique({ where: { id: payload.sid }, include: { user: true } });
+    if (!session || session.revokedAt || session.expiresAt <= new Date() || !session.user.isActive || !session.user.twoFactorEnabled || !(await bcrypt.compare(token, session.refreshTokenHash))) return deny(res);
+
+    // Cookies issued before rememberMe was included retain the previous refresh behavior.
+    const rememberMe = payload.rememberMe !== false;
+    const fresh = await prisma.$transaction(async (tx) => {
+      const now = new Date();
+      const revoked = await tx.session.updateMany({
+        where: { id: session.id, revokedAt: null, expiresAt: { gt: now }, user: { isActive: true, twoFactorEnabled: true } },
+        data: { revokedAt: now },
+      });
+      if (revoked.count !== 1) return null;
+      return makeSession(session.userId, rememberMe, req.get("user-agent"), tx);
+    });
+    if (!fresh) return deny(res);
+
+    res.cookie("hrms_refresh_token", fresh, cookieOptions(rememberMe));
+    return res.json({ success: true, accessToken: accessToken(session.user) });
+  } catch (error) {
+    next(error);
+  }
+});
 app.post("/api/auth/logout", async (req, res) => { const token = req.cookies.hrms_refresh_token as string | undefined; if (token) try { const payload = jwt.verify(token, signingSecret) as JwtPayload; if (typeof payload.sid === "string") await prisma.session.updateMany({ where: { id: payload.sid }, data: { revokedAt: new Date() } }); } catch {} res.clearCookie("hrms_refresh_token", cookieOptions(false)); res.clearCookie(challengeCookie, challengeOptions); return res.status(204).send(); });
 app.get("/api/auth/me", authenticate, authorize(Role.OWNER, Role.ADMIN), async (req: AuthRequest, res, next) => { try { const user = await prisma.user.findUnique({ where: { id: req.auth!.userId }, select: { id: true, email: true, role: true, isActive: true } }); return !user || !user.isActive ? deny(res) : res.json({ success: true, user }); } catch (error) { next(error); } });
 app.get("/api/auth/2fa/status", authenticate, async (req: AuthRequest, res, next) => { try { const user = await prisma.user.findUnique({ where: { id: req.auth!.userId }, select: { twoFactorEnabled: true, twoFactorEnabledAt: true } }); return res.json({ success: true, twoFactorEnabled: user?.twoFactorEnabled ?? false, twoFactorEnabledAt: user?.twoFactorEnabledAt ?? null }); } catch (error) { next(error); } });

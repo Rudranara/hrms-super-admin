@@ -113,6 +113,19 @@ test("accepts a current TOTP generated from the exact encrypted pending secret",
   assert.equal(enrollment.success, true);
   assert.equal(enrollment.recoveryCodes?.length, 10);
 
+  const refreshCookie = verification.headers.getSetCookie().find((cookie) => cookie.startsWith("hrms_refresh_token="))?.split(";")[0];
+  assert.ok(refreshCookie);
+  const renewal = await fetch(`${baseUrl}/api/auth/refresh`, { method: "POST", headers: { cookie: refreshCookie } });
+  assert.equal(renewal.status, 200);
+  assert.ok((await renewal.json()).accessToken);
+  const renewedCookie = renewal.headers.get("set-cookie");
+  assert.ok(renewedCookie && renewedCookie.startsWith("hrms_refresh_token="));
+  assert.doesNotMatch(renewedCookie, /Max-Age|Expires/i);
+  const rejectedRefresh = await fetch(`${baseUrl}/api/auth/refresh`, { method: "POST", headers: { cookie: refreshCookie } });
+  assert.equal(rejectedRefresh.status, 401);
+  const invalidRefresh = await fetch(`${baseUrl}/api/auth/refresh`, { method: "POST", headers: { cookie: "hrms_refresh_token=invalid-test-token" } });
+  assert.equal(invalidRefresh.status, 401);
+
   const enrolled = await prisma.user.findUniqueOrThrow({ where: { id: stored.id }, select: { twoFactorEnabled: true, twoFactorPendingSecretEncrypted: true } });
   assert.equal(enrolled.twoFactorEnabled, true);
   assert.equal(enrolled.twoFactorPendingSecretEncrypted, null);

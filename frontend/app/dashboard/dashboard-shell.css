@@ -267,6 +267,16 @@
 
 .dashboard-shell-content { min-width: 0; padding: 24px; }
 
+.dashboard-session-error { padding: 24px; text-align: center; }
+.dashboard-session-error button {
+  margin-top: 12px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  background: #006d55;
+  color: #fff;
+  cursor: pointer;
+}
+
 .dashboard-shell-sign-out-dialog {
   position: fixed;
   inset: 0;

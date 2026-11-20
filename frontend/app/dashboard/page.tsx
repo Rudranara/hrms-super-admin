@@ -1,52 +1,65 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { API_URL } from "../lib/api";
+import { accessTokenKey, type Administrator, loadAdministrator, signOutDashboard } from "./dashboard-session";
 import DashboardShell from "./dashboard-shell";
 
-type Administrator = { id: string; email: string; role: "OWNER" | "ADMIN" };
-
 export default function DashboardPage() {
-  const router = useRouter();
   const [administrator, setAdministrator] = useState<Administrator | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [sessionError, setSessionError] = useState(false);
+  const [sessionCheck, setSessionCheck] = useState(0);
 
   useEffect(() => {
     let isActive = true;
-    async function loadDashboard() {
-      let token = sessionStorage.getItem("hrms_access_token");
-      if (!token) {
-        const refresh = await fetch(`${API_URL}/api/auth/refresh`, { method: "POST", credentials: "include" });
-        if (refresh.ok) {
-          const data = await refresh.json() as { accessToken?: string };
-          token = data.accessToken || null;
-          if (token) sessionStorage.setItem("hrms_access_token", token);
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+    async function checkSession(retry = true) {
+      try {
+        const user = await loadAdministrator();
+        if (!isActive) return;
+        if (!user) {
+          sessionStorage.removeItem(accessTokenKey);
+          window.location.replace("/?session=expired");
+          return;
         }
+        setAdministrator(user);
+        setSessionError(false);
+      } catch {
+        if (!isActive) return;
+        if (retry) {
+          retryTimer = setTimeout(() => { void checkSession(false); }, 750);
+          return;
+        }
+        setSessionError(true);
       }
-      if (!token) return router.replace("/");
-      const response = await fetch(`${API_URL}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` }, credentials: "include" });
-      if (!response.ok) {
-        sessionStorage.removeItem("hrms_access_token");
-        return router.replace("/");
-      }
-      const data = await response.json() as { user: Administrator };
-      if (isActive) { setAdministrator(data.user); setIsLoading(false); }
     }
-    loadDashboard().catch(() => { sessionStorage.removeItem("hrms_access_token"); router.replace("/"); });
-    return () => { isActive = false; };
-  }, [router]);
+    void checkSession();
+    return () => {
+      isActive = false;
+      clearTimeout(retryTimer);
+    };
+  }, [sessionCheck]);
 
   async function logout() {
-    const response = await fetch(`${API_URL}/api/auth/logout`, { method: "POST", credentials: "include" });
-    if (!response.ok) throw new Error("Sign-out request failed.");
-    sessionStorage.removeItem("hrms_access_token");
-    router.replace("/");
+    await signOutDashboard();
+    window.location.replace("/");
   }
 
-  if (isLoading || !administrator) return <main className="dashboard-loading">Checking your session…</main>;
+  function retrySession() {
+    setSessionError(false);
+    setSessionCheck((current) => current + 1);
+  }
+
+  const connectionNotice = sessionError && (
+    <div className="dashboard-session-error">
+      <p role="status">Unable to connect to the dashboard. Please try again.</p>
+      <button type="button" onClick={retrySession}>Try again</button>
+    </div>
+  );
+  if (!administrator) return <main className="dashboard-loading">{connectionNotice || "Checking your session…"}</main>;
   return (
     <DashboardShell email={administrator.email} onSignOut={logout}>
+      {connectionNotice}
       <section className="dashboard-content">
         <p className="dashboard-eyebrow">SUPER ADMIN CONSOLE</p>
         <h1>Welcome back</h1>

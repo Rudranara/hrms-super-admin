@@ -57,14 +57,15 @@ export default function DashboardShell({ email, onSignOut, children }: { email: 
   const [query, setQuery] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [signOutFailed, setSignOutFailed] = useState(false);
-  const matchingSections = [overview, ...sections].filter(({ label }) => label.toLowerCase().includes(query.trim().toLowerCase()));
+  const searchTerm = query.trim().toLowerCase();
+  const showSearchResults = searchOpen && searchTerm.length > 0;
+  const matchingSections = [overview, ...sections].filter(({ label }) => label.toLowerCase().includes(searchTerm));
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
       if (signOutDialog.current?.open) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setSearchOpen(true);
         searchInput.current?.focus();
       }
       if (event.key === "Escape") {
@@ -115,10 +116,10 @@ export default function DashboardShell({ email, onSignOut, children }: { email: 
             }}>
               <div className="dashboard-shell-search-field">
                 <Icon name="search" />
-                <input ref={searchInput} type="search" aria-label="Search workspace" aria-controls={searchOpen ? "workspace-search-results" : undefined} placeholder="Search..." value={query} onFocus={() => setSearchOpen(true)} onChange={(event) => { setQuery(event.target.value); setSearchOpen(true); }} />
+                <input ref={searchInput} type="search" aria-label="Search workspace" aria-controls={showSearchResults ? "workspace-search-results" : undefined} placeholder="Search..." value={query} onChange={(event) => { setQuery(event.target.value); setSearchOpen(true); }} />
                 <kbd>Ctrl + K</kbd>
               </div>
-              {searchOpen && (
+              {showSearchResults && (
                 <ul className="dashboard-shell-search-results" id="workspace-search-results" aria-label="Workspace search results">
                   {matchingSections.length ? matchingSections.map(({ label, icon }) => (
                     <li key={label}>
