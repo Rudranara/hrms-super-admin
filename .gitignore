@@ -1,0 +1,16 @@
+**/.env
+**/.env.*
+!**/.env.example
+
+**/node_modules/
+**/dist/
+**/.next/
+**/out/
+**/build/
+
+**/*.log
+npm-debug.log*
+**/coverage/
+
+.DS_Store
+Thumbs.db
